@@ -1,0 +1,129 @@
+import math
+g0 = 9.81
+
+
+def area(r):
+    return math.pi * r * r
+
+def initial_fuel_mass(r0, rf, L, rho):
+    return math.pi * rho * L * (rf*rf - r0*r0)
+
+def oxidiser_flux(m_dot_o, r):
+    A = area(r)
+    return m_dot_o / A if A > 0.0 else 0.0
+
+def regression_rate(a, n, Go):
+    return a * (Go ** n)
+
+def integrate_burn(a, n, m_dot_o, r0, rf, L, rho, dt=0.01, max_steps=200000):
+    t = 0.0
+    r = r0
+    times = []
+    radii = []
+    mdot_f_list = []
+    m_fuel_init = initial_fuel_mass(r0, rf, L, rho)
+    m_fuel = m_fuel_init
+    steps = 0
+    while r < rf - 1e-12 and m_fuel > 0.0 and steps < max_steps:
+        Go = oxidiser_flux(m_dot_o, r)
+        drdt = regression_rate(a, n, Go)
+        if not math.isfinite(drdt) or drdt <= 0.0:
+            break
+        r_new = r + drdt * dt
+        dA = area(r_new) - area(r)
+        dm_f = rho * L * dA
+        mdot_f = dm_f / dt if dt > 0 else 0.0
+        times.append(t)
+        radii.append(r)
+        mdot_f_list.append(mdot_f)
+        m_fuel -= dm_f
+        r = r_new
+        t += dt
+        steps += 1
+    return times, radii, mdot_f_list, m_fuel_init, max(m_fuel, 0.0)
+
+
+def thrust(Isp, m_dot_o, m_dot_f,
+           p_c=20e5, p_a=101325.0, Ae_over_At=6.0,
+           cstar=1500.0, pe_over_pc=None):
+
+    mdot_tot = m_dot_o + m_dot_f
+
+
+    prop_term = Isp * g0 * mdot_tot
+
+
+    if p_c <= 0.0:
+        return prop_term
+
+    At = mdot_tot * cstar / p_c
+    Ae = Ae_over_At * At
+
+    if pe_over_pc is None:
+        pe = p_a
+    else:
+        pe = pe_over_pc * p_c
+
+    pressure_term = (pe - p_a) * Ae
+
+    return prop_term + pressure_term
+
+def summarize(a, n, L, m_dot_o, r0, rf, rho, Isp, dt=0.01):
+    times, radii, mdot_f_list, m_fuel_init, m_fuel_left = integrate_burn(a, n, m_dot_o, r0, rf, L, rho, dt=dt)
+    if not times:
+        return {"error"}
+
+    Flist = [thrust(Isp, m_dot_o, mf) for mf in mdot_f_list]
+
+    tb = times[-1]
+    m_fuel_burned = m_fuel_init - m_fuel_left
+    m_oxidiser = m_dot_o * tb
+    avg_OF = (m_oxidiser / m_fuel_burned) if m_fuel_burned>0 else float('nan')
+    avg_thrust = sum(Flist)/len(Flist) if Flist else 0.0
+    peak_thrust = max(Flist) if Flist else 0.0
+    total_impulse = 0.0
+    for i in range(len(Flist)-1):
+        total_impulse += 0.5*(Flist[i]+Flist[i+1])*(times[i+1]-times[i])
+    if len(Flist)==1:
+        total_impulse = Flist[0]*tb
+    return {
+        "burn_time_s": tb,
+        "fuel_init_kg": m_fuel_init,
+        "fuel_burned_kg": m_fuel_burned,
+        "oxidiser_kg": m_oxidiser,
+        "avg_OF": avg_OF,
+        "avg_thrust_N": avg_thrust,
+        "peak_thrust_N": peak_thrust,
+        "total_impulse_Ns": total_impulse,
+        "time_steps": len(times)
+    }
+
+def main():
+    r0_mm = 40
+    rf_mm = 80
+    L_mm = 92.1
+    rho = 900.0
+    a = 1.2e-4
+    n = 0.5
+    m_dot_o = 0.13
+    Isp = 1059
+    dt = 0.01
+
+    r0 = r0_mm / 1000.0
+    rf = rf_mm / 1000.0
+    L = L_mm / 1000.0
+
+    out = summarize(a, n, L, m_dot_o, r0, rf, rho, Isp, dt=dt)
+
+
+    print("burn time (s):          ", round(out["burn_time_s"], 3))
+    print("initial fuel (kg):      ", round(out["fuel_init_kg"], 6))
+    print("fuel burned (kg):       ", round(out["fuel_burned_kg"], 6))
+    print("oxidiser used (kg):     ", round(out["oxidiser_kg"], 6))
+    print("avg O/F:            ", round(out["avg_OF"], 4))
+    print("avg thrust (N):     ", round(out["avg_thrust_N"], 2))
+    print("peak thrust (N):        ", round(out["peak_thrust_N"], 2))
+    print("total impulse (Ns):     ", round(out["total_impulse_Ns"], 2))
+
+
+main()
