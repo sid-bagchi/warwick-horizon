@@ -18,9 +18,26 @@ Lv_data    = h_v_data - h_l_data;
 T_fit_min = min(T_data);
 T_fit_max = max(T_data);
 
-%pchip interpolation
-rho_l_fn = @(T) interp1(T_data, rho_l_data, T, 'pchip');
-rho_v_fn = @(T) interp1(T_data, rho_v_data, T, 'pchip');
+% Polynomial degree for density fits (used in ODE derivatives)
+n_rho = 7;
+
+% Fit polynomials to rho_l and rho_v for smooth derivatives
+[p_rho_l_ode, ~, mu_rho_l_ode] = polyfit(T_data, rho_l_data, n_rho);
+[p_rho_v_ode, ~, mu_rho_v_ode] = polyfit(T_data, rho_v_data, n_rho);
+
+% Analytic derivative coefficients
+% Use polyval with mu for evaluation; derivative requires chain rule: d/dT = d/dT_norm * (1/sigma)
+sigma_rho_l = mu_rho_l_ode(2);
+sigma_rho_v = mu_rho_v_ode(2);
+dp_rho_l    = polyder(p_rho_l_ode);
+dp_rho_v    = polyder(p_rho_v_ode);
+
+rho_l_fn  = @(T) polyval(p_rho_l_ode, T, [], mu_rho_l_ode);
+rho_v_fn  = @(T) polyval(p_rho_v_ode, T, [], mu_rho_v_ode);
+drho_l_fn = @(T) polyval(dp_rho_l, (T - mu_rho_l_ode(1)) / sigma_rho_l) / sigma_rho_l;
+drho_v_fn = @(T) polyval(dp_rho_v, (T - mu_rho_v_ode(1)) / sigma_rho_v) / sigma_rho_v;
+
+% pchip interpolation for all other thermodynamic properties
 Cv_l_fn  = @(T) interp1(T_data, Cv_l_data,  T, 'pchip');
 Cv_v_fn  = @(T) interp1(T_data, Cv_v_data,  T, 'pchip');
 Psat_fn  = @(T) interp1(T_data, Psat_data,  T, 'pchip');
@@ -29,11 +46,6 @@ h_l_fn   = @(T) interp1(T_data, h_l_data,   T, 'pchip');
 h_v_fn   = @(T) interp1(T_data, h_v_data,   T, 'pchip');
 s_l_fn   = @(T) interp1(T_data, s_l_data,   T, 'pchip');
 s_v_fn   = @(T) interp1(T_data, s_v_data,   T, 'pchip');
-
-% Numerical derivatives for density (central difference)
-dT_nd    = 0.01;
-drho_l_fn = @(T) (rho_l_fn(T + dT_nd) - rho_l_fn(T - dT_nd)) / (2*dT_nd);
-drho_v_fn = @(T) (rho_v_fn(T + dT_nd) - rho_v_fn(T - dT_nd)) / (2*dT_nd);
 
 T_check = 280.15;
 fprintf('=== Fit at %.1f K (%.1f°C) ===\n', T_check, T_check-273.15);
@@ -74,7 +86,7 @@ DeltaP0   = max(P_tank0 - P_chamber, 0);
 mdot_SPI0 = C_d * A_inj * sqrt(2 * rho_l_fn(T0) * DeltaP0);
 
 s_tank0 = s_l_fn(T0);
-[mdot_HEM0, x_exit0, rho_2ph0, delta_h0] = hem_model(T0, P_chamber, ...
+[mdot_HEM0, x_exit0, rho_2ph0, delta_h0] = hem_model(T0, ...
     s_tank0, C_d, A_inj, T_sat_chamber, ...
     s_l_fn, s_v_fn, rho_l_fn, rho_v_fn, h_l_fn, h_v_fn);
 
@@ -151,6 +163,10 @@ m_total  = m_l_sol + m_v_sol;
 [mdot_out, mdot_SPI_sol, mdot_HEM_sol] = arrayfun(@(Th) ...
     compute_mdot(Th*T_star, params), Theta);
 
+% Evaporation rate: re-evaluate RHS at each solution point to avoid
+% finite-difference noise on the irregularly-spaced ode45 output grid.
+mdot_evap = arrayfun(@(ml, Th) get_mdot_evap(ml, Th, params), mu_l, Theta);
+
 fprintf('\n=== Results ===\n');
 fprintf('Burn time = %.2f s\n',       t(end));
 fprintf('Final mass = %.3f kg\n',     m_total(end));
@@ -159,20 +175,13 @@ fprintf('Average mdot = %.4f kg/s\n', (m_N2O - m_total(end))/t(end));
 fprintf('Final T = %.1f°C\n',         T_sol(end)-273.15);
 fprintf('Final P = %.2f bar\n',       P_sol(end));
 
-mdot_measured = 1.29/6;
-mdot_model    = (m_N2O - m_total(end)) / t(end);
-Cd_fitted     = C_d * (mdot_measured / mdot_model);
-fprintf('\n=== Cd Calibration ===\n');
-fprintf('Measured average mdot = %.4f kg/s\n', mdot_measured);
-fprintf('Model average mdot    = %.4f kg/s\n', mdot_model);
-fprintf('Suggested Cd          = %.4f\n',      Cd_fitted);
-
 %% ========== PLOTS ==========
 
 % ---- Figure 1 ----
 n = 5;
-[p_rho_l, ~, mu_rho_l] = polyfit(T_data, rho_l_data, n);
-[p_rho_v, ~, mu_rho_v] = polyfit(T_data, rho_v_data, n);
+% Reuse degree-7 poly fits already computed for ODE density derivatives
+p_rho_l  = p_rho_l_ode;  mu_rho_l = mu_rho_l_ode;
+p_rho_v  = p_rho_v_ode;  mu_rho_v = mu_rho_v_ode;
 [p_Cv_l,  ~, mu_Cv_l]  = polyfit(T_data, Cv_l_data,  n);
 [p_Cv_v,  ~, mu_Cv_v]  = polyfit(T_data, Cv_v_data,  n);
 [p_Psat,  ~, mu_Psat]  = polyfit(T_data, Psat_data,  n);
@@ -266,7 +275,7 @@ plot(tau_sol, Pi_sol, 'm-', 'LineWidth',1.5);
 xlabel('\tau = t/t^*'); ylabel('\Pi = P/P^*');
 title('Non-dimensional pressure \Pi(\Theta)'); grid on; box on;
 
-% ---- Figure 3: Original blowdown figure with added nominal mdot line ----
+% ---- Figure 3 ----
 figure('Name','Blowdown','Position',[100 100 1400 900]);
 subplot(2,3,1);
 plot(t, P_sol, 'b-', 'LineWidth', 1.5); hold on;
@@ -304,15 +313,14 @@ legend('NHNE','SPI','HEM');
 title('Mass Flow Rates'); grid on;
 
 subplot(2,3,6);
-dt_vec    = diff(t);
-mdot_evap = -diff(m_l_sol)./dt_vec - mdot_out(1:end-1);
-plot(t(1:end-1), mdot_evap, 'm-', 'LineWidth', 1.5); hold on;
+plot(t, mdot_evap, 'm-', 'LineWidth', 1.5);
 xlim([0 7]);
 xlabel('Time (s)'); ylabel('Evaporation Rate (kg/s)');
 title('Evaporation Rate'); grid on;
+
 %% Functions
 
-function [mdot_HEM, x_exit, rho_2ph, delta_h] = hem_model(T_tank, P_chamber, ...
+function [mdot_HEM, x_exit, rho_2ph, delta_h] = hem_model(T_tank, ...
         s_tank, C_d, A_inj, T_sat_chamber, ...
         s_l_fn, s_v_fn, rho_l_fn, rho_v_fn, h_l_fn, h_v_fn)
     s_l_exit = s_l_fn(T_sat_chamber);
@@ -331,7 +339,7 @@ function [mdot_out, mdot_SPI, mdot_HEM] = compute_mdot(T_tank, p)
     DeltaP = max(P_tank - p.P_chamber, 0);
     mdot_SPI = p.C_d * p.A_inj * sqrt(2 * rho_l * DeltaP);
     s_tank = p.s_l_fn(T_tank);
-    [mdot_HEM, ~, ~, ~] = hem_model(T_tank, p.P_chamber, s_tank, ...
+    [mdot_HEM, ~, ~, ~] = hem_model(T_tank, s_tank, ...
         p.C_d, p.A_inj, p.T_sat_chamber, ...
         p.s_l_fn, p.s_v_fn, ...
         p.rho_l_fn, p.rho_v_fn, p.h_l_fn, p.h_v_fn);
@@ -366,6 +374,33 @@ function dxi = ode_rhs(~, xi, p)
     mdot_evap_nd = ((ahat_l+ahat_v)*Theta_dot + mdot_nd/vrl) / ghat;
     mu_l_dot     = -mdot_nd - mdot_evap_nd;
     dxi = [mu_l_dot; Theta_dot];
+end
+
+function mdot_evap = get_mdot_evap(mu_l, Theta, p)
+    if mu_l <= p.mu_l_min
+        mdot_evap = 0;
+        return;
+    end
+    vrl  = p.varrho_l(Theta);
+    vrv  = p.varrho_v(Theta);
+    mu_v = vrv * (p.V_star - mu_l/vrl);
+    T_tank  = Theta * p.T_star;
+    [mdot_out, ~, ~] = compute_mdot(T_tank, p);
+    mdot_nd = mdot_out * p.t_star / p.M_star;
+    dvrl = p.dvarrho_l(Theta);
+    dvrv = p.dvarrho_v(Theta);
+    ahat_l = (mu_l/vrl^2) * dvrl;
+    ahat_v = (mu_v/vrv^2) * dvrv;
+    ghat   = 1/vrv - 1/vrl;
+    Omega  = p.Omega_fn(Theta);
+    Lambda = p.Lambda_fn(Theta);
+    Psi    = p.Psi_fn(Theta);
+    Pi     = p.Pi_fn(Theta);
+    num       = -(Lambda/(vrl*ghat)) * mdot_nd;
+    den       = mu_l + Omega*mu_v + (ahat_l+ahat_v)*(Lambda/ghat - Psi*Pi);
+    Theta_dot = num / den;
+    mdot_evap_nd = ((ahat_l+ahat_v)*Theta_dot + mdot_nd/vrl) / ghat;
+    mdot_evap = mdot_evap_nd * p.M_star / p.t_star;
 end
 
 function [val, term, dir] = stop_event(tau, xi, p)
