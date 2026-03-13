@@ -5,4 +5,4 @@ This repository contains two live folders and one archive folder:
 2) ablative-fvm contains Python code for the ablative/thermal finite-volume modelling in Chapter 4;
 3) engine-throttling contains MATLAB code and Simulink files for the predictive controller in Chapter 7.
 
-ARCHIVE) Not relevant or discussed in project report. Initial sizing code.
+(ARCHIVE) Not relevant or discussed in project report. Initial sizing code.
